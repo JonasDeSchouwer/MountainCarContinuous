@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 
 from bpNet import bpQNet, bpPNet
-from utils import Memory
+from utils import Memory, DEVICE
 
 
 # setting environment
@@ -30,36 +30,28 @@ num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
 
-# device
-#if torch.cuda.is_available():
-if False:   #TODO
-    print("running on GPU")
-    device = torch.device("cuda")
-else:
-    print("running on CPU")
-    device = torch.device("cpu")
-
-
 # network
 qnet = bpQNet(num_observations, num_actions)
 #qnet.load("networks/bpQNet2")
-qnet.to(device)
+qnet.to(DEVICE)
 qnet = qnet.float()
 
 target_qnet = bpQNet(num_observations, num_actions)
 target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
+target_qnet.to(DEVICE)
 
 pnet = bpPNet(num_observations, num_actions)
 #pnet.load("networks/bpPNet2")
-pnet.to(device)
+pnet.to(DEVICE)
 pnet = pnet.float()
 
 target_pnet = bpPNet(num_observations, num_actions)
 target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
+target_pnet.to(DEVICE)
 
 # hyper parameters
-EPOCHS = 100
-Q_LEARNING_RATE = 0.01
+EPOCHS = 1
+Q_LEARNING_RATE = 0.05
 P_LEARNING_RATE = 0.1
 BATCH_SIZE = 30
 MEMORY = 10000
@@ -69,7 +61,7 @@ TARGET_UPDATE = 5
 criterion = nn.SmoothL1Loss()
 q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE, momentum=0.9)
 p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE, momentum=0.9)
-q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=0.96)
+q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=0.97)
 p_scheduler = lr_scheduler.MultiStepLR(p_optim, milestones=[30], gamma=0.1)
 
 def sigma_scheduler(epoch):
@@ -95,10 +87,10 @@ def run_and_save_episode(policy, epoch):
     observation = env.reset()
     done = False
     while not done:
-        action = policy.select_action(torch.tensor(observation, device=device), sigma=sigma_scheduler(epoch)).cpu().detach()        # change sigma for epoch-dependent action selection
-        star = torch.cat((torch.as_tensor(observation), torch.as_tensor(action)))
+        action = policy.select_action(torch.as_tensor(observation, device=DEVICE), sigma=sigma_scheduler(epoch)).cpu().detach()        # change sigma for epoch-dependent action selection
+        star = torch.cat((torch.as_tensor(observation, device=DEVICE), torch.as_tensor(action, device=DEVICE)))
         observation, reward, done, _ = env.step(action)
-        star = torch.cat((star, torch.as_tensor(observation), torch.as_tensor(reward).view(1)))
+        star = torch.cat((star, torch.as_tensor(observation, device=DEVICE), torch.as_tensor(reward, device=DEVICE).view(1)))
         memory.add_star(star)
         
         duration += 1
@@ -183,7 +175,6 @@ def plot_data(data):
 
     plt.plot(smooth_duration, 'b')
 
-
     plt.show()
 
 
@@ -210,6 +201,8 @@ def main():
 
     qnet.save("networks/bpQNet2")
     pnet.save("networks/bpPNet2")
+    with open(f"logs/{time.time()}", 'w') as f:
+        f.write(MONITOR_DATA)
     
 
 if __name__ == "__main__":

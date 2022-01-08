@@ -1,13 +1,13 @@
 import torch
-import numpy as np
 
 
+# device
 if torch.cuda.is_available():
     print("running on GPU")
-    device = torch.device("cuda")
+    DEVICE = torch.device("cuda")
 else:
     print("running on CPU")
-    device = torch.device("cpu")
+    DEVICE = torch.device("cpu")
 
 
 class Memory:
@@ -18,7 +18,7 @@ class Memory:
     def __init__(self, num_observations, num_actions, capacity):
         self.n_obs = num_observations
         self.n_act = num_actions
-        self.star = torch.zeros((capacity, self.n_obs + self.n_act + self.n_obs + 1))
+        self.star = torch.zeros((capacity, self.n_obs + self.n_act + self.n_obs + 1), device=DEVICE)
         self.length = 0
         
     def __len__(self):
@@ -46,18 +46,18 @@ class Memory:
         return self.star[:self.length, -1]
 
     def add_state(self, state, action, next_state, expected_reward=0):
-        self.star[self.length][:self.n_obs] = torch.tensor(state)
-        self.star[self.length][self.n_obs:self.n_obs+self.n_act] = torch.tensor(action)
-        self.star[self.length][self.n_obs+self.n_act : 2*self.n_obs+self.n_act] = torch.tensor(next_state)
+        self.star[self.length][:self.n_obs] = torch.as_tensor(state, device=DEVICE)
+        self.star[self.length][self.n_obs:self.n_obs+self.n_act] = torch.as_tensor(action, device=DEVICE)
+        self.star[self.length][self.n_obs+self.n_act : 2*self.n_obs+self.n_act] = torch.as_tensor(next_state, device=DEVICE)
         self.star[self.length][-1] = expected_reward
         self.length += 1
 
     def add_star(self, star):
-        self.star[self.length] = torch.tensor(star)
+        self.star[self.length] = torch.as_tensor(star, device=DEVICE)
         self.length += 1
     
     def remove_first_states(self, n):
-        np.roll(self.star, -n, axis=0)
+        torch.roll(self.star, shifts=-n, dims=0)
         self.star[-n:] = 0
         self.length -= n
 
