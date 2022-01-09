@@ -16,6 +16,8 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from torchvision.transforms.transforms import ToTensor
 
+from utils import DEVICE
+
 
 class bpQNet(torch.nn.Module):
     def __init__(self, num_observations, num_actions):
@@ -35,7 +37,7 @@ class bpQNet(torch.nn.Module):
             first obs elements: observation
             last act element: action
         """
-        x = torch.as_tensor(state, dtype=torch.float32)
+        x = torch.as_tensor(state, dtype=torch.float32, device=DEVICE)
         x = self.fcl1(x)
         x = F.relu(x)
         x = self.fcl2(x)
@@ -71,7 +73,7 @@ class bpPNet(torch.nn.Module):
         return the action with lowest q-value for a given obs x
         :param obs: B x obs matrix
         """
-        x = torch.as_tensor(obs, dtype=torch.float32)
+        x = torch.as_tensor(obs, dtype=torch.float32, device=DEVICE)
         x = self.fcl1(x)
         x = self.dropout1(x)
         x = F.relu(x)
@@ -91,7 +93,7 @@ class bpPNet(torch.nn.Module):
         """
 
         actions = self.forward(obs)
-        rand = 2*torch.rand(self.num_actions) - 1   #create random tensor between -1 and 1
+        rand = 2*torch.rand(self.num_actions, device=DEVICE) - 1   #create random tensor between -1 and 1
 
         if sigma >= 1:
             return actions

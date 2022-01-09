@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 
 from bpNet import bpPNet
+from utils import DEVICE
 
 # setting environment
 env = gym.make('BipedalWalker-v3')
@@ -25,18 +26,13 @@ if is_ipython:
 
 plt.ion()
 
-if False:   #TODO
-    device = torch.device("cuda")
-    print("running on gpu")
-else:
-    print("running on cpu")
-    device = torch.device("cpu")
 
 num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
-net = bpPNet(num_observations, num_actions).to(device)
-net.load("networks/bpPNet2")
+net = bpPNet(num_observations, num_actions)
+net.load("networks/bpPNet3")
+net.to(DEVICE)
 net.eval()
 
 want_to_exit = False
@@ -79,7 +75,7 @@ def main():
         while not done:
             env.render()
             if not paused:
-                action = net.select_action(observation, sigma=1).detach()
+                action = net.select_action(torch.as_tensor(observation, device=DEVICE), sigma=1).cpu().detach()
                 observation, reward, done, _ = env.step(action)
                 time.sleep(0.01)
             if want_to_exit:

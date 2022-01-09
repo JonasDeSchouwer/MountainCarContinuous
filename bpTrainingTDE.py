@@ -18,7 +18,8 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 
 from bpNet import bpQNet, bpPNet
-from utils import Memory, DEVICE
+from utils import Memory, DEVICE, nthroot
+from plotting import plot_durations, plot_rewards
 
 
 # setting environment
@@ -50,26 +51,33 @@ target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
 target_pnet.to(DEVICE)
 
 # hyper parameters
-EPOCHS = 1
-Q_LEARNING_RATE = 0.05
-P_LEARNING_RATE = 0.1
-BATCH_SIZE = 30
-MEMORY = 10000
-MEMORY_RENEWAL = int(1/4 * MEMORY)
+EPOCHS = 1000
+Q_LEARNING_RATE_INIT = 0.1
+Q_LEARNING_RATE_FINAL = 0.003
+P_LEARNING_RATE_INIT = 0.1
+P_LEARNING_RATE_FINAL = 0.003
+P_MILESTONES = [30,31, 200, 500]
 DISCOUNT = 0.93
 TARGET_UPDATE = 5
 criterion = nn.SmoothL1Loss()
-q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE, momentum=0.9)
-p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE, momentum=0.9)
-q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=0.97)
-p_scheduler = lr_scheduler.MultiStepLR(p_optim, milestones=[30], gamma=0.1)
+q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
+p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
+q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, \
+    gamma=nthroot(Q_LEARNING_RATE_FINAL/Q_LEARNING_RATE_INIT, EPOCHS/5))
+p_scheduler = lr_scheduler.MultiStepLR(p_optim, milestones=P_MILESTONES, \
+    gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, len(P_MILESTONES)))
 
 def sigma_scheduler(epoch):
-    M1 = 10
-    M2 = EPOCHS/5
+    M1 = 20
+    M2 = 75
     if epoch < M1: return 0
     elif epoch < M2: return (epoch-M1) / (M2-M1)
     else: return 1
+
+# practical hyper parameters
+BATCH_SIZE = 30
+MEMORY = 10000
+MEMORY_RENEWAL = int(1/4 * MEMORY)
 
 memory = Memory(num_observations, num_actions, 2*MEMORY)
 
@@ -106,8 +114,6 @@ def train_qmodel(q_func, q_target, p_target):
 
     running_loss = 0
     for transitions, next_states, rewards in memory.sample_tr_st_r(BATCH_SIZE):
-        #print(q_func(rand))
-
         q_values = q_func(transitions)
 
         next_transitions = torch.hstack((next_states, p_target(next_states)))
@@ -144,65 +150,37 @@ def train_pmodel(policy, q_target):
     return running_loss
 
 
-def plot_data(data):
-    """
-    :param data: list of tuples [(epoch, duration)]
-    """
-
-    epochs, durations = zip(*data)
-    epochs = np.array(epochs)
-    durations = np.array(durations)
-
-    plt.scatter(epochs, durations, c='r')
-
-    epochs_avg_duration = list(range(EPOCHS))
-    avg_duration = np.zeros(EPOCHS)       # avg_duration[i] = gemiddelde tijd in epoch i
-    for epoch in range(EPOCHS):
-        elements = durations[epochs==epoch]
-        if len(elements) == 0:
-            avg_duration[epoch] = avg_duration[epoch-1]
-        else:
-            average_dur = np.mean(elements)     #get those columns for which the first element is epoch
-            avg_duration[epoch] = average_dur
-
-    # take a rolling mean of avg_duration
-    D = 10
-    smooth_duration = np.zeros(EPOCHS)
-    for i in range(EPOCHS):
-        start = max(i-D, 0)
-        end = min(i+D,EPOCHS)
-        smooth_duration[i] = np.mean(avg_duration[start:end])
-
-    plt.plot(smooth_duration, 'b')
-
-    plt.show()
-
-
 def main():
-    for epoch in range(EPOCHS):
-        print(f"\nstarting epoch {epoch+1}/{EPOCHS}")
+    try:
+        for epoch in range(EPOCHS):
+            print(f"\nstarting epoch {epoch+1}/{EPOCHS}")
 
-        if len(memory) >= MEMORY:
-            memory.remove_first_states(MEMORY_RENEWAL)
+            if len(memory) >= MEMORY:
+                memory.remove_first_states(MEMORY_RENEWAL)
 
-        while len(memory) < MEMORY:
-            run_and_save_episode(pnet, epoch)
+            while len(memory) < MEMORY:
+                run_and_save_episode(pnet, epoch)
 
-        for i in range(5):
-            ploss = train_pmodel(pnet, qnet)
-            print(f"ploss: {ploss}")
+            for i in range(5):
+                ploss = train_pmodel(pnet, qnet)
+                print(f"ploss: {ploss}")
 
-        qloss = train_qmodel(qnet, target_qnet, target_pnet)
-        print(f"qloss: {qloss}")
+            qloss = train_qmodel(qnet, target_qnet, target_pnet)
+            print(f"qloss: {qloss}")
 
-        if epoch % TARGET_UPDATE == 0:
-            target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
-            target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
-
-    qnet.save("networks/bpQNet2")
-    pnet.save("networks/bpPNet2")
+            if epoch % TARGET_UPDATE == 0:
+                target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
+                target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
+    except KeyboardInterrupt:
+        qnet.save("networks/bpQNet3")
+        pnet.save("networks/bpPNet3")
+        with open(f"logs/{time.time()}", 'w') as f:
+            f.write(str(MONITOR_DATA))
+    
+    qnet.save("networks/bpQNet3")
+    pnet.save("networks/bpPNet3")
     with open(f"logs/{time.time()}", 'w') as f:
-        f.write(MONITOR_DATA)
+        f.write(str(MONITOR_DATA))
     
 
 if __name__ == "__main__":

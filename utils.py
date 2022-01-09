@@ -10,6 +10,12 @@ else:
     DEVICE = torch.device("cpu")
 
 
+def nthroot(a, n):
+    assert a >= 0, "you don't want to take the nth root of a negative number, pal"
+    return a ** (1/n)
+
+
+
 class Memory:
     # saves state-action-next_state-reward (star) as a Nx. matrix: first n_obs columns (obs), next n_act columns (act), next n_obs columns(next_obs), last column (rew)
     # state = observations
@@ -57,7 +63,7 @@ class Memory:
         self.length += 1
     
     def remove_first_states(self, n):
-        torch.roll(self.star, shifts=-n, dims=0)
+        self.star = torch.roll(self.star, shifts=-n, dims=0)
         self.star[-n:] = 0
         self.length -= n
 
