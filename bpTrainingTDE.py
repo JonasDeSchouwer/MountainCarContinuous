@@ -1,14 +1,7 @@
-from typing import Deque
 import gym
-import math
-import random
 import time
-import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-from collections import namedtuple, deque
-from itertools import count
-from PIL import Image
+import configparser
+import os
 
 import torch
 import torch.nn as nn
@@ -22,18 +15,20 @@ from utils import Memory, DEVICE, nthroot
 from plotting import plot_durations, plot_rewards
 
 
+CONFIG = configparser.ConfigParser()
+assert len(CONFIG.read(r"configurations\debug.ini"))>0, "config file could not be opened"
+
+
 # setting environment
 env = gym.make('BipedalWalker-v3')
-is_ipython = 'inline' in matplotlib.get_backend()
-if is_ipython:
-    from IPython import display
 num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
 
 # network
 qnet = bpQNet(num_observations, num_actions)
-#qnet.load("networks/bpQNet2")
+if CONFIG['network']['q_load'] not in ["", "None", "NONE"]:
+    qnet.load(CONFIG['network']['q_load'])
 qnet.to(DEVICE)
 qnet = qnet.float()
 
@@ -42,7 +37,8 @@ target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
 target_qnet.to(DEVICE)
 
 pnet = bpPNet(num_observations, num_actions)
-#pnet.load("networks/bpPNet2")
+if CONFIG['network']['p_load'] not in ["", "None", "NONE"]:
+    pnet.load(CONFIG['network']['p_load'])
 pnet.to(DEVICE)
 pnet = pnet.float()
 
@@ -50,34 +46,42 @@ target_pnet = bpPNet(num_observations, num_actions)
 target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
 target_pnet.to(DEVICE)
 
+Q_SAVE_LOCATION = CONFIG['network']['q_save']
+assert os.path.exists(os.path.dirname(Q_SAVE_LOCATION)) and \
+    (not os.path.exists(Q_SAVE_LOCATION) or not os.path.isdir(Q_SAVE_LOCATION)), \
+        f"q_save {Q_SAVE_LOCATION} is not a valid path"
+P_SAVE_LOCATION = CONFIG['network']['p_save']
+assert os.path.exists(os.path.dirname(P_SAVE_LOCATION)) and \
+    (not os.path.exists(P_SAVE_LOCATION) or not os.path.isdir(P_SAVE_LOCATION)), \
+        f"p_save {P_SAVE_LOCATION} is not a valid path"
+
+
 # hyper parameters
-EPOCHS = 1000
-Q_LEARNING_RATE_INIT = 0.1
-Q_LEARNING_RATE_FINAL = 0.003
-P_LEARNING_RATE_INIT = 0.1
-P_LEARNING_RATE_FINAL = 0.003
-P_MILESTONES = [30,31, 200, 500]
+HYPERP = CONFIG['hyperparameters']
+EPOCHS = int(HYPERP['epochs'])
+Q_LEARNING_RATE_INIT = float(HYPERP['q_lr_init'])
+Q_LEARNING_RATE_FINAL = float(HYPERP['q_lr_final'])
+P_LEARNING_RATE_INIT = float(HYPERP['p_lr_init'])
+P_LEARNING_RATE_FINAL = float(HYPERP['p_lr_final'])
 DISCOUNT = 0.93
 TARGET_UPDATE = 5
 criterion = nn.SmoothL1Loss()
 q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
 p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
-q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, \
-    gamma=nthroot(Q_LEARNING_RATE_FINAL/Q_LEARNING_RATE_INIT, EPOCHS/5))
-p_scheduler = lr_scheduler.MultiStepLR(p_optim, milestones=P_MILESTONES, \
-    gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, len(P_MILESTONES)))
+q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
+p_scheduler = lr_scheduler.StepLR(p_optim, step_size=25, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
 
 def sigma_scheduler(epoch):
-    M1 = 20
-    M2 = 75
+    M1 = int(CONFIG['hyperparameters']['M1'])
+    M2 = int(CONFIG['hyperparameters']['M2'])
     if epoch < M1: return 0
     elif epoch < M2: return (epoch-M1) / (M2-M1)
-    else: return 1
+    else: return 0.995
 
 # practical hyper parameters
-BATCH_SIZE = 30
-MEMORY = 10000
-MEMORY_RENEWAL = int(1/4 * MEMORY)
+BATCH_SIZE = 100
+MEMORY = int(HYPERP['memory'])
+MEMORY_RENEWAL = int(HYPERP['memory_renewal'])
 
 memory = Memory(num_observations, num_actions, 2*MEMORY)
 
@@ -122,10 +126,10 @@ def train_qmodel(q_func, q_target, p_target):
         loss = criterion(q_values, targets)
         running_loss += loss.item()
 
-        q_optim.zero_grad()
+        q_optim.zero_grad()         #BUGGGGGGG: niet elke batch moet lr geüpdatet worden!!!
         loss.backward()
         q_optim.step()
-        q_scheduler.step()
+    q_scheduler.step()
 
     return running_loss
 
@@ -145,7 +149,7 @@ def train_pmodel(policy, q_target):
         p_optim.zero_grad()
         loss.backward()
         p_optim.step()
-        p_scheduler.step()
+    p_scheduler.step()
 
     return running_loss
 
@@ -161,6 +165,9 @@ def main():
             while len(memory) < MEMORY:
                 run_and_save_episode(pnet, epoch)
 
+            print('P_lr:', p_scheduler.get_last_lr())
+            print('Q_lr:', q_scheduler.get_last_lr())
+
             for i in range(5):
                 ploss = train_pmodel(pnet, qnet)
                 print(f"ploss: {ploss}")
@@ -172,15 +179,21 @@ def main():
                 target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
                 target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
     except KeyboardInterrupt:
-        qnet.save("networks/bpQNet3")
-        pnet.save("networks/bpPNet3")
+        qnet.save(Q_SAVE_LOCATION)
+        pnet.save(P_SAVE_LOCATION)
+        print(f"Qnet saved to {Q_SAVE_LOCATION}")
+        print(f"Pnet saved to {P_SAVE_LOCATION}")
         with open(f"logs/{time.time()}", 'w') as f:
             f.write(str(MONITOR_DATA))
     
-    qnet.save("networks/bpQNet3")
-    pnet.save("networks/bpPNet3")
+    qnet.save(Q_SAVE_LOCATION)
+    pnet.save(P_SAVE_LOCATION)
+    print(f"Qnet saved to {Q_SAVE_LOCATION}")
+    print(f"Pnet saved to {P_SAVE_LOCATION}")
     with open(f"logs/{time.time()}", 'w') as f:
         f.write(str(MONITOR_DATA))
+
+    plot_rewards(MONITOR_DATA)
     
 
 if __name__ == "__main__":
