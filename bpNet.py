@@ -12,8 +12,8 @@ class bpQNet(torch.nn.Module):
         self.num_observations = num_observations
         self.num_actions = num_actions
 
-        self.fcl1 = nn.Linear(num_observations+num_actions, 50)
-        self.fcl2 = nn.Linear(50,50)
+        self.fcl1 = nn.Linear(num_observations+num_actions, 100)
+        self.fcl2 = nn.Linear(100,50)
         self.fcl3 = nn.Linear(50,1)
 
     def forward(self, state):
@@ -48,10 +48,8 @@ class bpPNet(torch.nn.Module):
         self.num_observations = num_observations
         self.num_actions = num_actions
 
-        self.fcl1 = nn.Linear(num_observations, 50)
-        self.dropout1 = nn.Dropout(p=0.2)
-        self.fcl2 = nn.Linear(50,50)
-        self.dropout2 = nn.Dropout(p=0.2)
+        self.fcl1 = nn.Linear(num_observations, 100)
+        self.fcl2 = nn.Linear(100,50)
         self.fcl3 = nn.Linear(50,num_actions)
 
     def forward(self, obs):
@@ -61,10 +59,8 @@ class bpPNet(torch.nn.Module):
         """
         x = torch.as_tensor(obs, dtype=torch.float32, device=DEVICE)
         x = self.fcl1(x)
-        x = self.dropout1(x)
         x = F.relu(x)
         x = self.fcl2(x)
-        x = self.dropout2(x)
         x = F.relu(x)
         x = self.fcl3(x)
         x = torch.tanh(x)       #because the actions are in [-1,1]

@@ -17,6 +17,7 @@ from plotting import plot_durations, plot_rewards
 
 CONFIG = configparser.ConfigParser()
 assert len(CONFIG.read(r"configurations\long_from_scratch.ini"))>0, "config file could not be opened"
+print("CONFIGURATION:", CONFIG['general']['name'])
 
 
 # setting environment
@@ -63,7 +64,7 @@ Q_LEARNING_RATE_INIT = float(HYPERP['q_lr_init'])
 Q_LEARNING_RATE_FINAL = float(HYPERP['q_lr_final'])
 P_LEARNING_RATE_INIT = float(HYPERP['p_lr_init'])
 P_LEARNING_RATE_FINAL = float(HYPERP['p_lr_final'])
-DISCOUNT = 0.93
+DISCOUNT = 1
 TARGET_UPDATE = 5
 criterion = nn.SmoothL1Loss()
 q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
@@ -126,7 +127,7 @@ def train_qmodel(q_func, q_target, p_target):
         loss = criterion(q_values, targets)
         running_loss += loss.item()
 
-        q_optim.zero_grad()         #BUGGGGGGG: niet elke batch moet lr geüpdatet worden!!!
+        q_optim.zero_grad()
         loss.backward()
         q_optim.step()
     q_scheduler.step()
