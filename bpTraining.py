@@ -1,255 +1,200 @@
-from typing import Deque
 import gym
-import math
-import random
 import time
-import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-from collections import namedtuple, deque
-from itertools import count
-from PIL import Image
+import configparser
+import os
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
 import torchvision.transforms as T
 
 from bpNet import bpQNet, bpPNet
+from utils import Memory, DEVICE, nthroot
+from plotting import plot_durations, plot_rewards
+
+
+CONFIG = configparser.ConfigParser()
+assert len(CONFIG.read(r"configurations\long_from_scratch.ini"))>0, "config file could not be opened"
 
 
 # setting environment
 env = gym.make('BipedalWalker-v3')
-is_ipython = 'inline' in matplotlib.get_backend()
-if is_ipython:
-    from IPython import display
 num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
 
-# device
-#if torch.cuda.is_available():
-if False:   #TODO
-    print("running on GPU")
-    device = torch.device("cuda")
-else:
-    print("running on CPU")
-    device = torch.device("cpu")
-
-
 # network
 qnet = bpQNet(num_observations, num_actions)
-qnet.load("networks/bpQNet")
-qnet.to(device)
+if CONFIG['network']['q_load'] not in ["", "None", "NONE"]:
+    qnet.load(CONFIG['network']['q_load'])
+qnet.to(DEVICE)
 qnet = qnet.float()
 
+target_qnet = bpQNet(num_observations, num_actions)
+target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
+target_qnet.to(DEVICE)
+
 pnet = bpPNet(num_observations, num_actions)
-pnet.load("networks/bpPNet")
-pnet.to(device)
+if CONFIG['network']['p_load'] not in ["", "None", "NONE"]:
+    pnet.load(CONFIG['network']['p_load'])
+pnet.to(DEVICE)
 pnet = pnet.float()
+
+target_pnet = bpPNet(num_observations, num_actions)
+target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
+target_pnet.to(DEVICE)
+
+Q_SAVE_LOCATION = CONFIG['network']['q_save']
+assert os.path.exists(os.path.dirname(Q_SAVE_LOCATION)) and \
+    (not os.path.exists(Q_SAVE_LOCATION) or not os.path.isdir(Q_SAVE_LOCATION)), \
+        f"q_save {Q_SAVE_LOCATION} is not a valid path"
+P_SAVE_LOCATION = CONFIG['network']['p_save']
+assert os.path.exists(os.path.dirname(P_SAVE_LOCATION)) and \
+    (not os.path.exists(P_SAVE_LOCATION) or not os.path.isdir(P_SAVE_LOCATION)), \
+        f"p_save {P_SAVE_LOCATION} is not a valid path"
 
 
 # hyper parameters
-EPOCHS = 300
-LEARNING_RATE = 0.005
-BATCH_SIZE = 30
-MEMORY = 10000
-MEMORY_RENEWAL = int(1/4 * MEMORY)
+HYPERP = CONFIG['hyperparameters']
+EPOCHS = int(HYPERP['epochs'])
+Q_LEARNING_RATE_INIT = float(HYPERP['q_lr_init'])
+Q_LEARNING_RATE_FINAL = float(HYPERP['q_lr_final'])
+P_LEARNING_RATE_INIT = float(HYPERP['p_lr_init'])
+P_LEARNING_RATE_FINAL = float(HYPERP['p_lr_final'])
 DISCOUNT = 0.93
+TARGET_UPDATE = 5
 criterion = nn.SmoothL1Loss()
-q_optim = optim.SGD(qnet.parameters(), lr=LEARNING_RATE, momentum=0.9)
-p_optim = optim.SGD(pnet.parameters(), lr=LEARNING_RATE, momentum=0.9)
+q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
+p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
+q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
+p_scheduler = lr_scheduler.StepLR(p_optim, step_size=25, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
 
+def sigma_scheduler(epoch):
+    M1 = int(CONFIG['hyperparameters']['M1'])
+    M2 = int(CONFIG['hyperparameters']['M2'])
+    if epoch < M1: return 0
+    elif epoch < M2: return (epoch-M1) / (M2-M1)
+    else: return 0.995
 
-class Memory:
-    # saves state-action-reward (star) as a Nx. matrix: first n_obs columns (obs), next n_act columns (act), last column (rew)
-    # state = observations
-    # transition = state + action
-
-    def __init__(self, num_observations, num_actions, capacity):
-        self.n_obs = num_observations
-        self.n_act = num_actions
-        self.star = torch.zeros((capacity, self.n_obs + self.n_act + 1))
-        self.length = 0
-        
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, index):
-        return self.star[index]
-    
-    def get_stars(self):
-        return self.star[:self.length]
-
-    def get_states(self):
-        return self.star[:self.length, :self.n_obs]
-    
-    def get_actions(self):
-        return self.star[:self.length, self.n_obs:self.n_obs+self.n_act]
-    
-    def get_rewards(self):
-        return self.star[:self.length, -1]
-
-    def add_state(self, state, action, expected_reward=0):
-        self.star[self.length][:self.n_obs] = torch.FloatTensor(state)
-        self.star[self.length][self.n_obs:self.n_obs+self.n_act] = torch.FloatTensor(action)
-        self.star[self.length][-1] = expected_reward
-        self.length += 1
-
-    def add_star(self, star):
-        self.star[self.length] = torch.FloatTensor(star)
-        self.length += 1
-    
-    def remove_first_states(self, n):
-        np.roll(self.star, -n, axis=0)
-        self.star[-n:] = 0
-        self.length -= n
-
-    def sample_st_a_r(self, batch_size):
-        # yield states, actions and rewards per batch as seperate matrices
-
-        star_copy = torch.clone(self.get_stars())
-
-        #shuffle the tensor
-        idx = torch.randperm(self.length)
-        star_copy = star_copy[idx].view(star_copy.size())
-
-        for k in range(0, self.length, batch_size):
-            batch = star_copy[k:k+batch_size]
-            yield (batch[:, :self.n_obs], batch[:, self.n_obs:self.n_obs+self.n_act], batch[:,-1])
-        
-    def sample_tr_r(self, batch_size):
-        # yield transitions (st+a) and rewards per batch as seperate matrices
-        
-        star_copy = torch.clone(self.get_stars())
-
-        #shuffle the tensor
-        idx = torch.randperm(self.length)
-        star_copy = star_copy[idx].view(star_copy.size())
-
-        for k in range(0, self.length, batch_size):
-            batch = star_copy[k:k+batch_size]
-            yield (batch[:, :self.n_obs+self.n_act], batch[:,-1])
-
+# practical hyper parameters
+BATCH_SIZE = 100
+MEMORY = int(HYPERP['memory'])
+MEMORY_RENEWAL = int(HYPERP['memory_renewal'])
 
 memory = Memory(num_observations, num_actions, 2*MEMORY)
 
 
-def run_and_save_episode(policy):
+MONITOR_DATA = []   # add a tuple (epoch, duration, reward) every time an episode is run
+def run_and_save_episode(policy, epoch):
     global memory
 
     # run the environment with the current neural network and save the results to memory
-    # return the duration of the episode
+    # add (epoch, duration, reward) to MONITOR_DATA
+
+    total_reward = 0
+    duration = 1
+
     observation = env.reset()
-    stars = [] #list of transitions
-    rewards = []
     done = False
     while not done:
-        action = policy.select_action(torch.tensor(observation, device=device), sigma=1).cpu().detach()        # change sigma for epoch-dependent action selection
-        stars.append(list(observation) + list(action))
+        action = policy.select_action(torch.as_tensor(observation, device=DEVICE), sigma=sigma_scheduler(epoch)).cpu().detach()        # change sigma for epoch-dependent action selection
+        star = torch.cat((torch.as_tensor(observation, device=DEVICE), torch.as_tensor(action, device=DEVICE)))
         observation, reward, done, _ = env.step(action)
-        rewards.append(reward)
-    
-    assert len(stars) == len(rewards)
-    n = len(rewards)
-    cumulative_reward = 0
-    for i in range(n-1,-1,-1):
-        cumulative_reward = rewards[i] + DISCOUNT * cumulative_reward
-        stars[i] += [cumulative_reward]
-    
-    for star in stars:
+        star = torch.cat((star, torch.as_tensor(observation, device=DEVICE), torch.as_tensor(reward, device=DEVICE).view(1)))
         memory.add_star(star)
+        
+        duration += 1
+        total_reward += reward
 
-    return n
+    MONITOR_DATA.append((epoch, duration, float(total_reward)))
+    print((epoch, duration, float(total_reward)))
 
 
-def train_qmodel(q_func):
+def train_qmodel(q_func, q_target, p_target):
     # do one training cycle
     # return the total loss
 
     running_loss = 0
-    for transitions, rewards in memory.sample_tr_r(BATCH_SIZE):
-        #print(q_func(rand))
-
+    for transitions, next_states, rewards in memory.sample_tr_st_r(BATCH_SIZE):
         q_values = q_func(transitions)
-        loss = criterion(q_values, rewards.view(-1,1))
+
+        next_transitions = torch.hstack((next_states, p_target(next_states)))
+        targets = rewards + DISCOUNT * q_target(next_transitions)
+
+        loss = criterion(q_values, targets)
         running_loss += loss.item()
 
-        q_optim.zero_grad()
+        q_optim.zero_grad()         #BUGGGGGGG: niet elke batch moet lr geüpdatet worden!!!
         loss.backward()
         q_optim.step()
+    q_scheduler.step()
 
     return running_loss
 
 
-def train_pmodel(policy, q_func):
+def train_pmodel(policy, q_target):
     # do one training cycle
     # return the total loss
     running_loss = 0
     policy.train()
-    for states, _, _ in memory.sample_st_a_r(BATCH_SIZE):
+    for states in memory.sample_states(BATCH_SIZE):
         actions = policy(states)
         transitions = torch.hstack((states, actions))
-        q_vector = q_func(transitions)
+        q_vector = q_target(transitions)
         loss = -torch.mean(q_vector, dim=0)     # let the cost be the opposite of the q values of the generated transitions, as our goal is to maximize this q-value
         running_loss += loss.item()
 
         p_optim.zero_grad()
         loss.backward()
         p_optim.step()
+    p_scheduler.step()
 
     return running_loss
 
 
-data = []   # tuples of (epoch, duration)
-for epoch in range(EPOCHS):
-    print(f"starting epoch {epoch+1}/{EPOCHS}")
+def main():
+    try:
+        for epoch in range(EPOCHS):
+            print(f"\nstarting epoch {epoch+1}/{EPOCHS}")
 
-    if len(memory) >= MEMORY:
-        memory.remove_first_states(MEMORY_RENEWAL)
+            if len(memory) >= MEMORY:
+                memory.remove_first_states(MEMORY_RENEWAL)
 
-    while len(memory) < MEMORY:
-        duration = run_and_save_episode(pnet)
-        data.append((epoch, duration))
+            while len(memory) < MEMORY:
+                run_and_save_episode(pnet, epoch)
 
-    for i in range(5):
-        ploss = train_pmodel(pnet, qnet)
-        print(f"ploss: {ploss}")
+            print('P_lr:', p_scheduler.get_last_lr())
+            print('Q_lr:', q_scheduler.get_last_lr())
 
-    qloss = train_qmodel(qnet)
-    print(f"qloss: {qloss}")
+            for i in range(5):
+                ploss = train_pmodel(pnet, qnet)
+                print(f"ploss: {ploss}")
 
+            qloss = train_qmodel(qnet, target_qnet, target_pnet)
+            print(f"qloss: {qloss}")
 
-epochs, durations = zip(*data)
-epochs = np.array(epochs)
-durations = np.array(durations)
-
-plt.scatter(epochs, durations, c='r')
-
-epochs_avg_duration = list(range(EPOCHS))
-avg_duration = np.zeros(EPOCHS)       # avg_duration[i] = gemiddelde tijd in epoch i
-for epoch in range(EPOCHS):
-    elements = durations[epochs==epoch]
-    if len(elements) == 0:
-        avg_duration[epoch] = avg_duration[epoch-1]
-    else:
-        average_dur = np.mean(elements)     #get those columns for which the first element is epoch
-        avg_duration[epoch] = average_dur
-
-# take a rolling mean of avg_duration
-D = 10
-smooth_duration = np.zeros(EPOCHS)
-for i in range(EPOCHS):
-    start = max(i-D, 0)
-    end = min(i+D,EPOCHS)
-    smooth_duration[i] = np.mean(avg_duration[start:end])
-
-plt.plot(smooth_duration, 'b')
-
-
-plt.show()
-
-qnet.save("networks/bpQNet")
-pnet.save("networks/bpPNet")
+            if epoch % TARGET_UPDATE == 0:
+                target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
+                target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
+    except KeyboardInterrupt:
+        qnet.save(Q_SAVE_LOCATION)
+        pnet.save(P_SAVE_LOCATION)
+        print(f"Qnet saved to {Q_SAVE_LOCATION}")
+        print(f"Pnet saved to {P_SAVE_LOCATION}")
+        with open(f"logs/{time.time()}", 'w') as f:
+            f.write(str(MONITOR_DATA))
     
+    qnet.save(Q_SAVE_LOCATION)
+    pnet.save(P_SAVE_LOCATION)
+    print(f"Qnet saved to {Q_SAVE_LOCATION}")
+    print(f"Pnet saved to {P_SAVE_LOCATION}")
+    with open(f"logs/{time.time()}", 'w') as f:
+        f.write(str(MONITOR_DATA))
+
+    plot_rewards(MONITOR_DATA)
+    
+
+if __name__ == "__main__":
+    main()
