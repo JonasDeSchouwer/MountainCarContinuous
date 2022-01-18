@@ -16,6 +16,24 @@ class bpQNet(torch.nn.Module):
         self.fcl2 = nn.Linear(100,50)
         self.fcl3 = nn.Linear(50,1)
 
+        # bounds of the network output (used for normalization)
+        self.LOWER = -200
+        self.UPPER = 400
+
+    def normalize(self, x):
+        """
+        normalize [-LOWER,UPPER] into [-1,1]
+        """
+        return torch.clip(2*(x-self.LOWER)/(self.UPPER-self.LOWER)-1, min=-1, max=1)
+
+    def denormalize(self, x):
+        """
+        denormalize [-1,1] into [-LOWER,UPPER]
+        [-1,1]: network output
+        [-LOWER, UPPER]: predicted reward
+        """
+        return (x+1)/2 * (self.UPPER-self.LOWER) + self.LOWER
+
     def forward(self, state):
         """
         return the Q-value for a given state x (obs+actions)
@@ -29,6 +47,8 @@ class bpQNet(torch.nn.Module):
         x = self.fcl2(x)
         x = F.relu(x)
         x = self.fcl3(x)
+        x = torch.tanh(x)
+        x = self.denormalize(x)
 
         return x
     
@@ -75,7 +95,7 @@ class bpPNet(torch.nn.Module):
         """
 
         actions = self.forward(obs)
-        rand = 2*torch.rand(self.num_actions, device=DEVICE) - 1   #create random tensor between -1 and 1
+        rand = 2*torch.rand(size=actions.shape, device=DEVICE) - 1   #create random tensor between -1 and 1
 
         if sigma >= 1:
             return actions

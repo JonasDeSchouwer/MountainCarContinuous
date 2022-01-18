@@ -31,7 +31,7 @@ num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
 net = bpPNet(num_observations, num_actions)
-net.load("networks/bpPNet")
+net.load("networks/bpPNet2")
 net.to(DEVICE)
 net.eval()
 
