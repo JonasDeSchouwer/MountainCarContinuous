@@ -1,5 +1,5 @@
 """
-We will try to plot data in the form of a list of tuples (epoch, duration, reward)
+We will try to plot data in the form of a list of tuples (epoch, num_episodes, duration, reward)
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ def plot_durations(data):
     :param data: list of tuples [(epoch, duration)]
     """
 
-    epochs, durations, _ = zip(*data)
+    epochs, _, durations, _ = zip(*data)
     EPOCHS = max(epochs)
     epochs = np.array(epochs)
     durations = np.array(durations)
@@ -45,7 +45,7 @@ def plot_rewards(data):
     :param data: list of tuples [(epoch, duration)]
     """
 
-    epochs, _, rewards = zip(*data)
+    epochs, _, _, rewards = zip(*data)
     EPOCHS = max(epochs)
     epochs = np.array(epochs)
     rewards = np.array(rewards)
