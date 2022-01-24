@@ -1,4 +1,5 @@
 import torch
+import logging
 
 
 # device
@@ -130,3 +131,34 @@ class Memory:
 
         for k in range(0, self.length, batch_size):
             yield star_copy[k:k+batch_size, :self.n_obs]
+
+
+class OrnsteinUhlenbeck:
+    """
+    models an Ornstein-Uhlenbeck process with parameters sigma and theta.
+    https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process
+    this is used to introduce temporal coherence (and mean-reverting) to the noise of our policy network
+    """
+
+    def __init__(self, theta, sigma, shape=None, init=None):
+        self.theta = theta
+        self.sigma = sigma
+
+        if init is None:
+            if shape is None:
+                self.value = torch.zeros(size=(), device=DEVICE)
+                self.shape = tuple()
+                logging.info("init and shape are both None: default value 0")
+            else:
+                self.value = torch.zeros(size=shape, device=DEVICE)
+                self.shape = shape
+        else:
+            if shape is not None:
+                assert init.shape == shape, "keywords shape and init do not match"
+            self.value = init
+            self.shape = init.shape
+    
+    def step(self):
+        self.value = (1-self.theta)*self.value + torch.normal(0, std=self.sigma, size=self.shape, device=DEVICE)
+        return self.value
+

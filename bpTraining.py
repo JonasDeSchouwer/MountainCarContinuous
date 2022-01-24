@@ -1,5 +1,6 @@
 from typing import List
 import gym
+from gym.wrappers.monitoring.video_recorder import VideoRecorder
 import time
 import datetime
 import configparser
@@ -21,7 +22,7 @@ from plotting import plot_durations, plot_rewards
 
 # configuration
 CONFIG = configparser.ConfigParser()
-assert len(CONFIG.read(r"configurations\continue_training.ini"))>0, "config file could not be opened"
+assert len(CONFIG.read(r"configurations\debug.ini"))>0, "config file could not be opened"
 print("CONFIGURATION:", CONFIG['general']['name'])
 
 
@@ -39,6 +40,9 @@ Q_SAVE_LOCATION = os.path.join(TASK_DIR, 'qNet')
 Q_BEST_LOCATION = os.path.join(TASK_DIR, 'qBest')
 P_SAVE_LOCATION = os.path.join(TASK_DIR, 'pNet')
 P_BEST_LOCATION = os.path.join(TASK_DIR, 'pBest')
+VIDEO_BASE_PATH = os.path.join(TASK_DIR, 'recordings')
+os.mkdir(VIDEO_BASE_PATH)
+
 
 # logging
 LOG_PATH = os.path.join(TASK_DIR, "log.txt")
@@ -104,24 +108,25 @@ DISCOUNT = 0.99
 NUM_P_STEPS_PER_EPOCH = 1   # number of times that the p network is optimized per epoch
 TARGET_UPDATE = 5           # number of epochs between refreshing the target networks
 criterion = nn.SmoothL1Loss()
-q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0)
+q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
 p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
 q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=nthroot(Q_LEARNING_RATE_FINAL/Q_LEARNING_RATE_INIT, EPOCHS/5))
-p_scheduler = lr_scheduler.StepLR(p_optim, step_size=25, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
+p_scheduler = lr_scheduler.StepLR(p_optim, step_size=5*NUM_P_STEPS_PER_EPOCH, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
 
 def sigma_scheduler(epoch):
     M1 = int(CONFIG['hyperparameters']['M1'])
     M2 = int(CONFIG['hyperparameters']['M2'])
-    if epoch < M1: return 0
-    elif epoch < M2: return (epoch-M1) / (M2-M1)
-    else: return 0.995
+    END_VALUE = float(CONFIG['hyperparameters']['end_value'])
+    if epoch < M1: return 1
+    elif epoch < M2: return 1 - (epoch-M1) / (M2-M1) + END_VALUE
+    else: return END_VALUE
 
 # practical hyper parameters
 BATCH_SIZE = 100
 MEMORY = int(HYPERP['memory'])
 MEMORY_RENEWAL = int(HYPERP['memory_renewal'])
 
-memory = Memory(num_observations, num_actions, 2*MEMORY)
+memory = Memory(num_observations, num_actions, MEMORY+2000)
 
 
 MONITOR_DATA : List = []            # item epoch: (epoch, num_episodes, avg_duration, avg_reward)
@@ -130,8 +135,8 @@ ROLLING_REWARD_THRESHOLD = -40      # every time this threshold is achieved, the
 
 def run_and_save_episode(policy, epoch):
     """run the environment with the current neural network and save the results to memory, return statistics"""
-
     global memory
+
     total_reward = 0
     duration = 1
 
@@ -178,6 +183,22 @@ def refill_memory(policy, epoch):
     logger.info('Average duration:'.center(23) + str(avg_duration))
     logger.info('Average reward:'.center(23) + str(avg_reward))
     MONITOR_DATA.append((epoch, num_episodes, avg_duration, avg_reward))
+
+
+def record_episode(policy: bpPNet, path):
+    """run the environment (deterministically) with the current neural network and save the recording"""
+
+    recorder = VideoRecorder(env=env, path=path, enabled=True)
+
+    observation = env.reset()
+    done = False
+    while not done:
+        recorder.capture_frame()
+        action = policy.select_action(torch.as_tensor(observation, device=DEVICE), sigma=0).cpu().detach()        # change sigma for epoch-dependent action selection
+        observation, _, done, _ = env.step(action)
+
+    recorder.close()
+    env.close()
 
 
 def save_models_if_necessary(qnet, pnet):
@@ -272,6 +293,9 @@ def main():
     try:
         for epoch in range(EPOCHS):
             logger.info(f"\nstarting epoch {epoch+1}/{EPOCHS}")
+
+            if epoch%10 == 0:
+                record_episode(policy=pnet, path=os.path.join(VIDEO_BASE_PATH, f"epoch {epoch}.mp4"))
 
             refill_memory(pnet, epoch)
             save_models_if_necessary(qnet=qnet, pnet=pnet)

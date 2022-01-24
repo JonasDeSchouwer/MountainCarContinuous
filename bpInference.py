@@ -31,7 +31,7 @@ num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
 net = bpPNet(num_observations, num_actions)
-net.load(r"tasks\22.01.20-19.59_medium_from_scratch1\pBest")
+net.load(r"tasks\22.01.20-21.51_long_from_scratch\pNet")
 net.to(DEVICE)
 net.eval()
 
