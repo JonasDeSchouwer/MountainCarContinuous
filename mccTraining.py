@@ -15,14 +15,14 @@ import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from bpNet import bpQNet, bpPNet
-from utils import Memory, DEVICE, nthroot
+from mccNet import mccQNet, mccPNet
+from utils import Memory, DEVICE, nthroot, soft_update
 from plotting import plot_durations, plot_rewards
 
 
 # configuration
 CONFIG = configparser.ConfigParser()
-assert len(CONFIG.read(r"configurations\debug.ini"))>0, "config file could not be opened"
+assert len(CONFIG.read(r"configurations\medium_from_scratch.ini"))>0, "config file could not be opened"
 print("CONFIGURATION:", CONFIG['general']['name'])
 
 
@@ -58,30 +58,29 @@ logger.addHandler(file_handle)
 
 
 # setting environment
-env = gym.make('BipedalWalker-v3')
+env = gym.make('MountainCarContinuous-v0')
 num_observations = env.observation_space.shape[0]
 num_actions = env.action_space.shape[0]
 
 
 # network
-qnet = bpQNet(num_observations, num_actions)
-qnet.fcl3.bias = torch.nn.Parameter(torch.atanh(qnet.normalize(torch.tensor([-70.], device=DEVICE))))
+qnet = mccQNet(num_observations, num_actions)
 if CONFIG['network']['q_load'] not in ["", "None", "NONE"]:
     qnet.load(CONFIG['network']['q_load'])
 qnet.to(DEVICE)
 qnet = qnet.float()
 
-target_qnet = bpQNet(num_observations, num_actions)
+target_qnet = mccQNet(num_observations, num_actions)
 target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
 target_qnet.to(DEVICE)
 
-pnet = bpPNet(num_observations, num_actions)
+pnet = mccPNet(num_observations, num_actions)
 if CONFIG['network']['p_load'] not in ["", "None", "NONE"]:
     pnet.load(CONFIG['network']['p_load'])
 pnet.to(DEVICE)
 pnet = pnet.float()
 
-target_pnet = bpPNet(num_observations, num_actions)
+target_pnet = mccPNet(num_observations, num_actions)
 target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
 target_pnet.to(DEVICE)
 
@@ -106,10 +105,11 @@ P_LEARNING_RATE_INIT = float(HYPERP['p_lr_init'])
 P_LEARNING_RATE_FINAL = float(HYPERP['p_lr_final'])
 DISCOUNT = 0.99
 NUM_P_STEPS_PER_EPOCH = 1   # number of times that the p network is optimized per epoch
-TARGET_UPDATE = 5           # number of epochs between refreshing the target networks
+TARGET_UPDATE = 1           # number of epochs before updating the target networks
+TAU = float(HYPERP['tau'])
 criterion = nn.SmoothL1Loss()
-q_optim = optim.SGD(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
-p_optim = optim.SGD(pnet.parameters(), lr=P_LEARNING_RATE_INIT, momentum=0.9, nesterov=True, weight_decay=0.005)
+q_optim = optim.Adam(qnet.parameters(), lr=Q_LEARNING_RATE_INIT, weight_decay=0.01)
+p_optim = optim.Adam(pnet.parameters(), lr=P_LEARNING_RATE_INIT)
 q_scheduler = lr_scheduler.StepLR(q_optim, step_size=5, gamma=nthroot(Q_LEARNING_RATE_FINAL/Q_LEARNING_RATE_INIT, EPOCHS/5))
 p_scheduler = lr_scheduler.StepLR(p_optim, step_size=5*NUM_P_STEPS_PER_EPOCH, gamma=nthroot(P_LEARNING_RATE_FINAL/P_LEARNING_RATE_INIT, EPOCHS/5))
 
@@ -123,6 +123,7 @@ def sigma_scheduler(epoch):
 
 # practical hyper parameters
 BATCH_SIZE = 100
+BATCHES_PER_ITER = 10
 MEMORY = int(HYPERP['memory'])
 MEMORY_RENEWAL = int(HYPERP['memory_renewal'])
 
@@ -133,12 +134,11 @@ MONITOR_DATA : List = []            # item epoch: (epoch, num_episodes, avg_dura
 ROLLING_REWARD_THRESHOLD = -40      # every time this threshold is achieved, the networks are saved (and the threshold is increased by 10)
 
 
-def run_and_save_episode(policy, epoch):
+def run_and_save_episode(policy: mccPNet, epoch, mem: Memory):
     """run the environment with the current neural network and save the results to memory, return statistics"""
-    global memory
-
     total_reward = 0
     duration = 1
+    policy.eval()
 
     observation = env.reset()
     done = False
@@ -146,8 +146,9 @@ def run_and_save_episode(policy, epoch):
         action = policy.select_action(torch.as_tensor(observation, device=DEVICE), sigma=sigma_scheduler(epoch)).cpu().detach()        # change sigma for epoch-dependent action selection
         star = torch.cat((torch.as_tensor(observation, device=DEVICE), torch.as_tensor(action, device=DEVICE)))
         observation, reward, done, _ = env.step(action)
+        reward += -0.01+0.01*np.sin(3*observation[0])      # little hack: give an extra penalty for being low to the bottom
         star = torch.cat((star, torch.as_tensor(observation, device=DEVICE), torch.as_tensor(reward, device=DEVICE).view(1)))
-        memory.add_star(star)
+        mem.add_star(star)
         
         duration += 1
         total_reward += reward
@@ -172,10 +173,14 @@ def refill_memory(policy, epoch):
         memory.remove_first_states(MEMORY_RENEWAL)
 
     while len(memory) < MEMORY:
-        duration, total_reward = run_and_save_episode(policy, epoch)
+        duration, total_reward = run_and_save_episode(policy, epoch, mem=memory)
         durations.append(duration)
         total_rewards.append(total_reward)
         num_episodes += 1
+
+        if num_episodes%100 == 0:
+            logger.info(f"episode nr {num_episodes}")
+            logger.info(f"  memory length: {memory.length}")
 
     avg_duration = np.mean(durations) if num_episodes > 0 else MONITOR_DATA[epoch-1][2]
     avg_reward = np.mean(total_rewards) if num_episodes > 0 else MONITOR_DATA[epoch-1][3]
@@ -185,16 +190,17 @@ def refill_memory(policy, epoch):
     MONITOR_DATA.append((epoch, num_episodes, avg_duration, avg_reward))
 
 
-def record_episode(policy: bpPNet, path):
+def record_episode(policy: mccPNet, path, sigma=0):
     """run the environment (deterministically) with the current neural network and save the recording"""
 
+    policy.eval()
     recorder = VideoRecorder(env=env, path=path, enabled=True)
 
     observation = env.reset()
     done = False
     while not done:
         recorder.capture_frame()
-        action = policy.select_action(torch.as_tensor(observation, device=DEVICE), sigma=0).cpu().detach()        # change sigma for epoch-dependent action selection
+        action = policy.select_action(torch.as_tensor(observation, device=DEVICE), sigma=sigma).cpu().detach()        # change sigma for epoch-dependent action selection
         observation, _, done, _ = env.step(action)
 
     recorder.close()
@@ -218,20 +224,24 @@ def save_models_if_necessary(qnet, pnet):
         logger.info("Rolling reward exceeded threshold! Networks saved!")
 
 
-def train_qmodel(q_func: bpQNet, q_target: bpQNet, p_target: bpPNet, sigma):
+def train_qmodel(q_func: mccQNet, q_target: mccQNet, p_target: mccPNet):
     # do one training cycle
     # return the total loss
+
+    q_func.train()
+    q_target.eval()
+    p_target.eval()
 
     total_q = []
     fcl_grad_std = []    # save tuples (fcl1_grad_std, fcl2_grad_std, fcl3_grad_std)
     fcl3_abs_bias = []
     running_loss = 0.
     
-    for transitions, next_states, rewards in memory.sample_tr_st_r(BATCH_SIZE):
+    for transitions, next_states, rewards in memory.sample_tr_st_r(BATCH_SIZE, max_batches=BATCHES_PER_ITER):
         q_values = q_func(transitions)
 
-        next_transitions = torch.hstack((next_states, p_target.select_action(next_states, sigma=sigma)))
-        targets = rewards + DISCOUNT * q_target(next_transitions)
+        next_transitions = torch.hstack((next_states, p_target.select_action(next_states, sigma=0)))
+        targets = rewards + DISCOUNT * q_target(next_transitions)           # TODO: do not add q_target(next_transitions) for terminal states
 
         loss = criterion(q_func.normalize(q_values), q_func.normalize(targets))
 
@@ -257,15 +267,17 @@ def train_qmodel(q_func: bpQNet, q_target: bpQNet, p_target: bpPNet, sigma):
     logger.debug(f"qloss: {running_loss}")
 
 
-def train_pmodel(policy: bpPNet, q_target: bpQNet):
+def train_pmodel(policy: mccPNet, q_target: mccQNet):
     # do one training cycle
     # return the total loss
 
+    policy.train()
+    q_target.eval()
+
     fcl_grad_std = []    # save tuples (fcl1_grad_std, fcl2_grad_std, fcl3_grad_std)
     running_loss = 0.
-    policy.train()
 
-    for states in memory.sample_states(BATCH_SIZE):
+    for states in memory.sample_states(BATCH_SIZE, max_batches=BATCHES_PER_ITER):
         actions = policy(states)
         transitions = torch.hstack((states, actions))
         q_vector = q_target(transitions)
@@ -294,8 +306,9 @@ def main():
         for epoch in range(EPOCHS):
             logger.info(f"\nstarting epoch {epoch+1}/{EPOCHS}")
 
-            if epoch%10 == 0:
-                record_episode(policy=pnet, path=os.path.join(VIDEO_BASE_PATH, f"epoch {epoch}.mp4"))
+            if epoch>0 and epoch%100 == 0:
+                record_episode(policy=pnet, path=os.path.join(VIDEO_BASE_PATH, f"epoch {epoch} det.mp4"), sigma=0)
+                record_episode(policy=pnet, path=os.path.join(VIDEO_BASE_PATH, f"epoch {epoch} stoch.mp4"), sigma=sigma_scheduler(epoch))
 
             refill_memory(pnet, epoch)
             save_models_if_necessary(qnet=qnet, pnet=pnet)
@@ -305,12 +318,12 @@ def main():
 
             # train models
             for i in range(NUM_P_STEPS_PER_EPOCH):
-                train_pmodel(pnet, qnet)
-            train_qmodel(qnet, target_qnet, target_pnet, sigma=sigma_scheduler(epoch))
+                train_pmodel(pnet, target_qnet)
+            train_qmodel(qnet, target_qnet, target_pnet)
 
             if epoch % TARGET_UPDATE == 0:
-                target_qnet.load_state_dict(qnet.state_dict())      # type: ignore
-                target_pnet.load_state_dict(pnet.state_dict())      # type: ignore
+                soft_update(target_qnet, qnet, TAU)
+                soft_update(target_pnet, pnet, TAU)
     except KeyboardInterrupt:
         pass
     

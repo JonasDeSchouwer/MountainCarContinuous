@@ -2,23 +2,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils import DEVICE, OrnsteinUhlenbeck
+from utils import DEVICE, GaussianNoise
 
 
-class bpQNet(torch.nn.Module):
+class mccQNet(torch.nn.Module):
     def __init__(self, num_observations, num_actions):
-        super(bpQNet, self).__init__()
+        super(mccQNet, self).__init__()
 
         self.num_observations = num_observations
         self.num_actions = num_actions
 
+        # remember to switch to eval mode when evaluating, as we use batch normalization
+        self.batchnorm = nn.BatchNorm1d(num_observations+num_actions)
         self.fcl1 = nn.Linear(num_observations+num_actions, 100)
         self.fcl2 = nn.Linear(100,50)
         self.fcl3 = nn.Linear(50,1)
 
         # bounds of the network output (used for normalization)
         self.LOWER = -200
-        self.UPPER = 400
+        self.UPPER = 200
 
     def normalize(self, x):
         """
@@ -61,18 +63,20 @@ class bpQNet(torch.nn.Module):
 
 
     
-class bpPNet(torch.nn.Module):
+class mccPNet(torch.nn.Module):
     def __init__(self, num_observations, num_actions):
-        super(bpPNet, self).__init__()
+        super(mccPNet, self).__init__()
 
         self.num_observations = num_observations
         self.num_actions = num_actions
 
+        # remember to switch to eval mode when evaluating, as we use batch normalization
+        self.batchnorm = nn.BatchNorm1d(num_observations)
         self.fcl1 = nn.Linear(num_observations, 100)
         self.fcl2 = nn.Linear(100,50)
         self.fcl3 = nn.Linear(50,num_actions)
 
-        self.noise_scheduler = OrnsteinUhlenbeck(theta=0.1, sigma=0.1, shape=(num_actions,))
+        self.noise_scheduler = GaussianNoise(std=0.1, shape=(num_actions,))
 
     def forward(self, obs):
         """

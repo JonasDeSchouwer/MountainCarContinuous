@@ -1,0 +1,1 @@
+TD error, omdat de Bellman equation moet gelden ongeacht de policy die later gebruikt wordt

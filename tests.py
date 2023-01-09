@@ -3,9 +3,9 @@ import matplotlib.pyplot as plt
 from utils import OrnsteinUhlenbeck
 
 def OrnsteinUhlenbeck_visualization():
-    gen = OrnsteinUhlenbeck(theta=0.1, sigma=0.1)
+    gen = OrnsteinUhlenbeck(theta=0.15, sigma=0.2)
     l = []
-    for _ in range(100):
+    for _ in range(1000):
         l.append(gen.step().item())
 
     plt.plot(l)
